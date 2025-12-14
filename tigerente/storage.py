@@ -7,17 +7,12 @@ from typing import Any
 
 LOCK = threading.Lock()
 CONFIG_DIR = Path.home() / ".config" / "tigerente"
-
+if not CONFIG_DIR.exists():
+    os.makedirs(CONFIG_DIR)
 logging.basicConfig(filename=CONFIG_DIR / "info.log", level=logging.INFO)
 
 
-def require_config_dir():
-    if not CONFIG_DIR.exists():
-        os.makedirs(CONFIG_DIR)
-
-
 def require_config_file(name: str, initial_value: str):
-    require_config_dir()
     if not (CONFIG_DIR / name).exists():
         (CONFIG_DIR / name).write_text(initial_value)
 
@@ -53,7 +48,6 @@ class Configuration:
     _config_state = {}
 
     def __init__(self):
-        require_config_dir()
         if not self._path.exists():
             self._save()
         else:
