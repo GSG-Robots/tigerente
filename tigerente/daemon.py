@@ -33,7 +33,7 @@ async def scan_for_devices():
     global bleio
     while not SHOULD_EXIT:
         async with scan_locked():
-            logging.debug("Starting scan...")
+            logging.info("Starting scan...")
             devices = await bleak.BleakScanner.discover(common.DEVICE_SEARCH_ROUND)
         scan_time = time.time()
         if bleio is not None and bleio.address in config.cached_devices:
@@ -46,7 +46,7 @@ async def scan_for_devices():
             if device.name is None or not device.name.startswith("GSG-"):
                 continue
             config.cache_device(device.address, device.name[4:], scan_time)
-        logging.debug("Finished scan.")
+        logging.info("Finished scan.")
         await asyncio.sleep(common.DEVICE_SEARCH_PAUSE)
     logging.info("STOPPED SCAN")
 
@@ -158,8 +158,12 @@ async def handle_client(conn: socket.socket):
             if bleio is not None:
                 await send(conn, common.Success.OK)
                 tasks = Tasks(conn)
-                await build.folder_sync(bleio, Path(dir_), tasks)
+                success = await build.folder_sync(bleio, Path(dir_), tasks)
                 await tasks.done()
+                if success:
+                    await send(conn, common.Success.OK)
+                else:
+                    await send(conn, common.Success.FAILED)
             else:
                 await send(conn, common.Success.FAILED)
         case common.Querys.HUB_START_PROGRAM:

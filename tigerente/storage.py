@@ -8,7 +8,7 @@ from typing import Any
 LOCK = threading.Lock()
 CONFIG_DIR = Path.home() / ".config" / "tigerente"
 
-logging.basicConfig(filename=CONFIG_DIR / "debug.log", level=logging.DEBUG)
+logging.basicConfig(filename=CONFIG_DIR / "info.log", level=logging.INFO)
 
 
 def require_config_dir():

@@ -447,7 +447,8 @@ def sync(directory: Path, dev: str):
                     task_progress[data["id"]].remove_task(tasks[data["id"]])
                 case _:
                     raise AssertionError
-    if prog.success:
+
+    if prog.success and resp.get_success() == common.Success.OK:
         console.print(
             "[grey50][[green]:heavy_check_mark:[/]] [green]Synced.[/]",
         )

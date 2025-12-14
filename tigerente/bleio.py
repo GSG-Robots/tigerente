@@ -1,3 +1,4 @@
+import logging
 from collections import deque
 
 import bleak
@@ -31,7 +32,7 @@ class BLEIOConnector:
         await self._ble.disconnect()
 
     async def _async_print(self, data: bytes):
-        print("Invalid Packet", data)
+        logging.warning("Invalid Packet", data)
 
     def get_packet(self):
         if self._pending_packets:

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import math
 import os
 import shutil
@@ -22,6 +23,7 @@ class ForceReconnect(BaseException): ...
 
 
 mpy_cross.set_version("1.20", 6)
+mpy_cross.fix_perms()
 
 
 async def expect_OK(bleio: BLEIOConnector, ignore=b"="):
@@ -34,7 +36,7 @@ async def expect_OK(bleio: BLEIOConnector, ignore=b"="):
         if nxt in ignore:
             continue
         if nxt != b"K":
-            print(f"Expecting OK, Invalid response {nxt}, resetting connection")
+            logging.warning(f"Expecting OK, Invalid response {nxt}, resetting connection")
             await bleio.send_packet(b"$")
             raise ForceReconnect
         return True
@@ -61,13 +63,15 @@ async def send_file(bleio: BLEIOConnector, file, task: Task | None = None):
 
 def build_py(src: Path, dest: Path, src_dir: Path):
     result = subprocess.run(
-        ["mpy-cross", "-c", "6.3", src.relative_to(src_dir), "-o", dest],
+        [mpy_cross.mpy_cross, src.relative_to(src_dir), "-o", dest],
         check=False,
         cwd=src_dir,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     if result.returncode != 0:
-        print(result.stderr.decode("utf-8"))
+        logging.warning(result.stdout.decode("utf-8"))
+        logging.error(result.stderr.decode("utf-8"))
         return False
     return True
 
@@ -103,7 +107,7 @@ def build(src_dir: Path, build_dir: Path):
             continue
         builder, new_suffix = file_builders.get(file.suffix, (None, None, None))
         if not builder:
-            print(f"Unable to build {file.suffix} file.")
+            logging.warning(f"Unable to build {file.suffix} file.")
             continue
         wanted_dest = build_dir / file.with_suffix(new_suffix).relative_to(src_dir)
 
@@ -113,8 +117,9 @@ def build(src_dir: Path, build_dir: Path):
 
         result = builder(file, wanted_dest, src_dir)
         if not result:
-            print(f"Failed to build {file.relative_to(src_dir).as_posix()}.")
-            continue
+            logging.error(f"Failed to build {file.relative_to(src_dir).as_posix()}.")
+            return False
+    return True
 
 
 async def sync_path(
@@ -146,7 +151,7 @@ async def sync_path(
             if nxt == b"K":
                 break
             if nxt != b"U":
-                print(
+                logging.warning(
                     f"Expecting OK or U, Invalid response {nxt}, resetting connection",
                 )
                 await bleio.send_packet(b"$")
@@ -200,11 +205,14 @@ async def folder_sync(
     tasks: Tasks,
 ):
     with tempfile.TemporaryDirectory() as BUILD_DIR:
+        logging.info(BUILD_DIR)
         await sync_stream(bleio, 10)
 
-        build(src_dir, Path(BUILD_DIR))
-
+        success = build(src_dir, Path(BUILD_DIR))
+        if not success:
+            return False
         await sync_dir(bleio, Path(BUILD_DIR), tasks)
 
         await bleio.send_packet(b"P")
         await expect_OK(bleio)
+    return True
