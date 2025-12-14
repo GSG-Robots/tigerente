@@ -30,4 +30,4 @@ jobs:
       - name: Smoke test (source distribution)
         run: uv run --isolated --no-project --with dist/*.tar.gz tente --help
       - name: Publish
-        run: uv publish
+        run: uv publish --token {{ secrets.UV_PUBLISH_TOKEN }} dist/*
