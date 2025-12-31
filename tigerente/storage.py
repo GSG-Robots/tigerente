@@ -5,6 +5,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .types import CachedDevice
+
 LOCK = threading.Lock()
 CONFIG_DIR = Path.home() / ".config" / "tigerente"
 if not CONFIG_DIR.exists():
@@ -75,18 +77,30 @@ class Configuration:
         self._config_state["target_device"] = value
         self._save()
 
-    def cache_device(self, address: str, name: str, last_seen: float):
+    def cache_device(
+        self,
+        address: str,
+        name: str,
+        last_seen: float,
+        protocol_version: int | None = None,
+        feature_level: int | None = None,
+    ):
         if "device_cache" not in self._config_state:
             self._config_state["device_cache"] = {}
-        self._config_state["device_cache"][address] = {
+        new_device = {
             "address": address,
             "name": name,
             "last_seen": last_seen,
         }
+        if protocol_version is not None:
+            new_device["protocol_version"] = protocol_version
+        if feature_level is not None:
+            new_device["feature_level"] = feature_level
+        self._config_state["device_cache"][address].update(new_device)
         self._save()
 
     @property
-    def cached_devices(self):
+    def cached_devices(self) -> dict[str, CachedDevice]:
         return self._config_state.get("device_cache", {})
 
 

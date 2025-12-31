@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections import deque
 
@@ -21,7 +22,7 @@ class BLEIOConnector:
         self._packet = b""
         self._packet_handlers = {}
         self._error_handler = self._async_print
-        self._pending_packets = deque()
+        self._pending_packets: deque[tuple[bytes, bytes]] = deque()
 
     async def connect(self):
         await self._ble.connect()
@@ -38,6 +39,16 @@ class BLEIOConnector:
         if self._pending_packets:
             return self._pending_packets.popleft()
         return None
+
+    async def get_packet_wait(self):
+        ms = 0
+        while not self._pending_packets:
+            await asyncio.sleep(0.001)
+            ms += 1
+
+            if ms >= 1000:
+                raise TimeoutError
+        return self._pending_packets.popleft()
 
     async def _handle_rx(
         self,

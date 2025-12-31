@@ -3,7 +3,6 @@ import json
 import logging
 import socket
 import time
-import traceback
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -43,9 +42,9 @@ async def scan_for_devices():
                 scan_time,
             )
         for device in devices:
-            if device.name is None or not device.name.startswith("GSG-"):
+            if device.name is None or not device.name.startswith("SPZG-"):
                 continue
-            config.cache_device(device.address, device.name[4:], scan_time)
+            config.cache_device(device.address, device.name[5:], scan_time)
         logging.info("Finished scan.")
         await asyncio.sleep(common.DEVICE_SEARCH_PAUSE)
     logging.info("STOPPED SCAN")
@@ -71,9 +70,25 @@ async def stay_connected():
                 bleio = BLEIOConnector(config.target_device)
                 try:
                     await bleio.connect()
+                    await bleio.send_packet(b"V")
+                    try:
+                        packet, device_version = await bleio.get_packet_wait()
+                        assert packet == b"V"
+                    except (TimeoutError, AssertionError):
+                        device_version = b"\00\00\00\00"
+                    protocol_version = int.from_bytes(device_version[:2], "big")
+                    feature_level = int.from_bytes(device_version[2:], "big")
+                    # Incompat is checked in client/CLI
+                    config.cache_device(
+                        bleio.address,
+                        config.cached_devices[bleio.address]["name"],
+                        time.time(),
+                        protocol_version,
+                        feature_level,
+                    )
                     conn_state = common.ConnectionState.CONNECTED
                 except Exception as e:
-                    traceback.print_exception(e)
+                    logging.error("Failed to connect", exc_info=e)
                     conn_state = common.ConnectionState.DISCONNECTED
                     bleio = None
         await asyncio.sleep(common.DEVICE_CONNECT_PAUSE)
@@ -120,6 +135,8 @@ async def handle_client(conn: socket.socket):
                             "name": "Unkown",
                             "last_seen": 0,
                             "address": config.target_device,
+                            "protocol_version": None,
+                            "feature_level": None,
                         },
                     ),
                 )

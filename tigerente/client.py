@@ -14,8 +14,9 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.text import Text
 
-from . import common
+from . import common, version
 from .daemon import run_daemon
+from .types import CachedDevice
 
 console = Console()
 
@@ -105,11 +106,11 @@ def send(command: common.Querys, args: str = "", start_new_daemon=True):
     return _Response(s)
 
 
-def get_all_devices():
+def get_all_devices() -> dict[str, CachedDevice]:
     return send(common.Querys.GET_ALL_DEVICES).get_data()
 
 
-def get_nearby_devices():
+def get_nearby_devices() -> dict[str, CachedDevice]:
     return send(common.Querys.GET_NEAR_DEVICES).get_data()
 
 
@@ -127,7 +128,7 @@ def unset_target_device():
     assert success == common.Success.OK
 
 
-def get_target_device() -> dict[str, str] | None:
+def get_target_device() -> CachedDevice | None:
     return send(common.Querys.GET_TARGET_DEVICE).get_data()
 
 
@@ -181,7 +182,7 @@ def ensure_correct_device(mac_address: str):
                 and mac_address not in get_nearby_devices()
             ):
                 console.print(
-                    "[[bright_red]x[/]] [bright_red]Device not nearby.[/]",
+                    "[grey50][[bright_red]x[/]][/] [bright_red]Device not nearby.[/]",
                 )
                 sys.exit(0)
     return datetime.datetime.now() - start
@@ -196,8 +197,9 @@ _STATE_MAP_DICONNECT = {
 }
 
 
-def ensure_disconnect(feedback=False):
-    old = get_target_device()
+def ensure_disconnect(feedback=False, old=None):
+    if old is None:
+        old = get_target_device()
     unset_target_device()
     text = Text.from_markup("[grey70]([yellow]00:00[/]) Scheduling...[/]")
     start = datetime.datetime.now()
@@ -214,12 +216,41 @@ def ensure_disconnect(feedback=False):
         took = datetime.datetime.now() - start
         if took.seconds > 1:
             console.print(
-                f"[[green]:heavy_check_mark:[/]] ({took.seconds // 60:0>2}:{took.seconds % 60:0>2}) [green]Disconnected.[/]",
+                f"[grey50][[green]:heavy_check_mark:[/]][/] ({took.seconds // 60:0>2}:{took.seconds % 60:0>2}) [green]Disconnected.[/]",
             )
         else:
             console.print(
-                "[[green]:heavy_check_mark:[/]] [green]Disconnected.[/]",
+                "[grey50][[green]:heavy_check_mark:[/]][/] [green]Disconnected.[/]",
             )
+
+
+def list_devices(devices: dict[str, CachedDevice], current_state, current_device: CachedDevice | None):
+    for device in devices.values():
+        console.print(
+            f"[grey70]- [blue]{device['name']}[/] [grey50]({device['address']})[/][/]"
+            + (
+                "[grey70] ([green]connected[/])[/]"
+                if current_state == common.ConnectionState.CONNECTED
+                and current_device
+                and current_device["address"] == device["address"]
+                else ""
+            )
+            + (
+                "[grey70] ([bright_red]likely too outdated[/])[/]"
+                if device.get("protocol_version", 0) < version.PROTOCOL_VERSION
+                else (
+                    "[grey70] ([yellow]likely outdated[/])[/]"
+                    if device.get("feature_level", 0) < version.FEATURE_LEVEL
+                    else ""
+                )
+            )
+            + (
+                "[grey70] ([bright_red]likely too updated[/])[/]"
+                if device.get("protocol_version", 0) > version.PROTOCOL_VERSION
+                or device.get("feature_level", 0) > version.FEATURE_LEVEL
+                else ("")
+            ),
+        )
 
 
 def ensure_connected(dev: str | None, final_feedback=True):
@@ -236,20 +267,10 @@ def ensure_connected(dev: str | None, final_feedback=True):
         else:
             devices = get_nearby_devices()
             if not devices:
-                console.print("[[bright_red1]x[/]] [bright_red]No devices found.[/]")
+                console.print("[grey50][[bright_red]x[/]][/] [bright_red]No devices found.[/]")
                 return None
             console.print("[grey70]These devices seem to be nearby:[/]")
-            for device in devices.values():
-                console.print(
-                    f"[grey70]- [blue]{device['name']}[/] [grey50]({device['address']})[/][/]"
-                    + (
-                        "[grey70] ([green]connected[/])[/]"
-                        if current_state == common.ConnectionState.CONNECTED
-                        and current_device
-                        and current_device["address"] == device["address"]
-                        else ""
-                    ),
-                )
+            list_devices(devices, current_state, current_device)
             name = Prompt.ask(
                 "[grey70]Choose a device to connect to[/]",
                 choices=[device["name"] for device in devices.values()],
@@ -277,14 +298,33 @@ def ensure_connected(dev: str | None, final_feedback=True):
                     took = ensure_correct_device(device["address"])
                     break
             else:
-                console.print("[[bright_red]x[/]] [bright_red]Device not found.[/]")
-                sys.exit(0)
+                console.print("[grey50][[bright_red]x[/]][/] [bright_red]Device not found.[/]")
+                sys.exit(1)
 
-    if final_feedback:
-        current_device = get_target_device()
-        assert current_device is not None
+    current_device = get_target_device()
+    assert current_device is not None
+    if current_device.get("protocol_version", 0) < version.PROTOCOL_VERSION:
         console.print(
-            f"[grey50][[blue]:information:[/]] You are connected to [blue]{current_device['name']}[/].[/]",
+            f"[grey50][[bright_red]x[/]][/] [bright_red]Device is too outdated to use. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+        )
+        unset_target_device()
+        sys.exit(1)
+    elif (
+        current_device.get("protocol_version", 0) > version.PROTOCOL_VERSION
+        or current_device.get("feature_level", 0) > version.FEATURE_LEVEL
+    ):
+        console.print(
+            f"[grey50][[bright_red]x[/]][/] [bright_red]CLI is too outdated to use this device. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+        )
+        unset_target_device()
+        sys.exit(1)
+    elif current_device.get("feature_level", 0) < version.FEATURE_LEVEL:
+        console.print(
+            f"[grey50][[yellow]![/]][/] [yellow]Device is outdated. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+        )
+    if final_feedback:
+        console.print(
+            f"[grey50][[blue]i[/]] You are connected to [blue]{current_device['name']}[/].[/]",
         )
     return took
 
@@ -328,17 +368,7 @@ def connect(name_or_mac: str | None):
             console.print("[[bright_red1]x[/]] [bright_red]No devices found.[/]")
             return
         console.print("[grey70]These devices seem to be nearby:[/]")
-        for device in devices.values():
-            console.print(
-                f"[grey70]- [blue]{device['name']}[/] [grey50]({device['address']})[/][/]"
-                + (
-                    "[grey70] ([green]connected[/])[/]"
-                    if current_state == common.ConnectionState.CONNECTED
-                    and current_device
-                    and current_device["address"] == device["address"]
-                    else ""
-                ),
-            )
+        list_devices(devices, current_state, current_device)
         name_or_mac = Prompt.ask(
             "[grey70]Choose a device to connect to[/]",
             choices=[device["name"] for device in devices.values()],
@@ -347,7 +377,7 @@ def connect(name_or_mac: str | None):
     took = ensure_connected(name_or_mac, final_feedback=False)
     current_device = get_target_device()
     if current_device is None:
-        console.print("[[bright_red1]x[/]] [bright_red]Failed to connect.[/]")
+        console.print("[grey50][[bright_red]x[/]][/] [bright_red]Failed to connect.[/]")
         return
     if took is not None and took.seconds > 1:
         console.print(
@@ -365,12 +395,12 @@ def disconnect():
     current_state = get_connection_state()
     if current_state == common.ConnectionState.DISCONNECTED:
         console.print(
-            "[[green]:heavy_check_mark:[/]] [green]You are already disconnected.[/]",
+            "[grey50][[green]:heavy_check_mark:[/]][/] [green]You are already disconnected.[/]",
         )
         return
     if current_state == common.ConnectionState.CONNECTED and current_device:
         console.print(
-            f"[grey50][[blue]:information:[/]] You were connected to [yellow]{current_device['name']}[/].[/]",
+            f"[grey50][[blue]i[/]] You were connected to [yellow]{current_device['name']}[/].[/]",
         )
     ensure_disconnect(feedback=True)
 
@@ -450,11 +480,11 @@ def sync(directory: Path, dev: str):
 
     if prog.success and resp.get_success() == common.Success.OK:
         console.print(
-            "[grey50][[green]:heavy_check_mark:[/]] [green]Synced.[/]",
+            "[grey50][[green]:heavy_check_mark:[/]] [green]Synced.[/][/]",
         )
     else:
         console.print(
-            "[[bright_red]x[/]] [bright_red]Failed to sync.[/]",
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to sync.[/]",
         )
 
 
@@ -462,8 +492,15 @@ def sync(directory: Path, dev: str):
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
 def start(dev: str):
     ensure_connected(dev)
-    success = send(common.Querys.HUB_START_PROGRAM).get_success()
-    console.print(success)
+    success = send(command=common.Querys.HUB_START_PROGRAM).get_success()
+    if success == common.Success.OK:
+        console.print(
+            "[grey50][[green]:heavy_check_mark:[/]] [green]Started program.[/][/]",
+        )
+    else:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to start program.[/]",
+        )
 
 
 @main.command("stop")
@@ -471,4 +508,11 @@ def start(dev: str):
 def stop(dev: str):
     ensure_connected(dev)
     success = send(common.Querys.HUB_STOP_PROGRAM).get_success()
-    console.print(success)
+    if success == common.Success.OK:
+        console.print(
+            "[grey50][[green]:heavy_check_mark:[/]] [green]Stopped program.[/][/]",
+        )
+    else:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to stop program.[/]",
+        )
