@@ -167,8 +167,9 @@ async def sync_dir(
     bleio: BLEIOConnector,
     dir: Path,
     tasks: Tasks,
+    mode: str,
 ):
-    await bleio.send_packet(b"Y")
+    await bleio.send_packet(b"Y" + mode.encode("ascii"))
     await expect_OK(bleio)
 
     files = tuple(dir.glob("**"))
@@ -203,15 +204,20 @@ async def folder_sync(
     bleio: BLEIOConnector,
     src_dir: Path,
     tasks: Tasks,
+    mode: str = "",
+    skip_build: bool = False,
 ):
     with tempfile.TemporaryDirectory() as BUILD_DIR:
         logging.info(BUILD_DIR)
         await sync_stream(bleio, 10)
 
-        success = build(src_dir, Path(BUILD_DIR))
-        if not success:
-            return False
-        await sync_dir(bleio, Path(BUILD_DIR), tasks)
+        if skip_build:
+            await sync_dir(bleio, src_dir, tasks, mode)
+        else:
+            success = build(src_dir, Path(BUILD_DIR))
+            if not success:
+                return False
+            await sync_dir(bleio, Path(BUILD_DIR), tasks, mode)
 
         await bleio.send_packet(b"P")
         await expect_OK(bleio)

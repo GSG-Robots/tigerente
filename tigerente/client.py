@@ -5,10 +5,13 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 import click
+import requests
 from rich import progress
 from rich.console import Console
 from rich.prompt import Prompt
@@ -21,7 +24,7 @@ from .types import CachedDevice
 console = Console()
 
 
-def get_sock(start_new=True, max_retries=5, delay=5) -> socket.socket:
+def get_sock(start_new=True, max_retries=10, delay=1) -> socket.socket:
     has_started_daemon = False
     for i in range(max_retries):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -136,6 +139,79 @@ def get_connection_state():
     return send(common.Querys.GET_CONNECTION_STATE).get_enum(common.ConnectionState)
 
 
+def sync_dir(directory: Path, firmware: bool):
+    resp = send(common.Querys.HUB_SYNC, json.dumps({"directory": str(directory.absolute()), "firmware_mode": firmware}))
+    assert resp.get_success() == common.Success.OK
+    prog = resp.progress()
+    tasks = {}
+    task_progress = {}
+    with (
+        progress.Progress(
+            progress.SpinnerColumn(),
+            progress.TextColumn("[grey70]{task.description}[/]"),
+            progress.BarColumn(),
+            progress.TaskProgressColumn(),
+            progress.TimeElapsedColumn(),
+            transient=False,
+            console=console,
+            expand=True,
+        ) as step_progress,
+        progress.Progress(
+            progress.TextColumn("[grey70]{task.description}[/]"),
+            progress.BarColumn(),
+            progress.DownloadColumn(),
+            progress.TimeRemainingColumn(),
+            transient=True,
+            console=console,
+            expand=True,
+        ) as byte_progress,
+    ):
+        for packet, data in prog:
+            match packet:
+                case common.TaskManager.STARTED:
+                    task_progress[data["id"]] = byte_progress if data["unit"] == "B" else step_progress
+                    tasks[data["id"]] = task_progress[data["id"]].add_task(
+                        data["name"],
+                        completed=data["prog"],
+                        total=data["max_prog"],
+                    )
+                case common.TaskManager.SET_PROG:
+                    task_progress[data["id"]].update(
+                        tasks[data["id"]],
+                        completed=data["prog"],
+                    )
+                case common.TaskManager.SET_MAX:
+                    task_progress[data["id"]].update(
+                        tasks[data["id"]],
+                        total=data["max_prog"],
+                    )
+                case common.TaskManager.FINISHED:
+                    task_progress[data["id"]].stop_task(tasks[data["id"]])
+                    task_progress[data["id"]].stop_task(tasks[data["id"]])
+                    if data["id"] != 1:
+                        task_progress[data["id"]].remove_task(tasks[data["id"]])
+                case common.TaskManager.FAILED:
+                    task_progress[data["id"]].stop_task(tasks[data["id"]])
+                    task_progress[data["id"]].remove_task(tasks[data["id"]])
+                case _:
+                    raise AssertionError
+
+    if prog.success and resp.get_success() == common.Success.OK:
+        console.print(
+            "[grey50][[green]:heavy_check_mark:[/]] [green]Synced.[/][/]",
+        )
+    else:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to sync.[/]",
+        )
+        sys.exit(1)
+
+
+def rename_hub(name: str):
+    assert len(name) <= 100
+    return send(common.Querys.HUB_RENAME, name).get_success()
+
+
 def wait_until(target: common.ConnectionState):
     while True:
         state = get_connection_state()
@@ -184,7 +260,7 @@ def ensure_correct_device(mac_address: str):
                 console.print(
                     "[grey50][[bright_red]x[/]][/] [bright_red]Device not nearby.[/]",
                 )
-                sys.exit(0)
+                sys.exit(1)
     return datetime.datetime.now() - start
 
 
@@ -253,7 +329,7 @@ def list_devices(devices: dict[str, CachedDevice], current_state, current_device
         )
 
 
-def ensure_connected(dev: str | None, final_feedback=True):
+def ensure_connected(dev: str | None, final_feedback=True, ignore_protocol_version=False):
     current_device = get_target_device()
     current_state = get_connection_state()
     took = None
@@ -303,25 +379,26 @@ def ensure_connected(dev: str | None, final_feedback=True):
 
     current_device = get_target_device()
     assert current_device is not None
-    if current_device.get("protocol_version", 0) < version.PROTOCOL_VERSION:
-        console.print(
-            f"[grey50][[bright_red]x[/]][/] [bright_red]Device is too outdated to use. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
-        )
-        unset_target_device()
-        sys.exit(1)
-    elif (
-        current_device.get("protocol_version", 0) > version.PROTOCOL_VERSION
-        or current_device.get("feature_level", 0) > version.FEATURE_LEVEL
-    ):
-        console.print(
-            f"[grey50][[bright_red]x[/]][/] [bright_red]CLI is too outdated to use this device. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
-        )
-        unset_target_device()
-        sys.exit(1)
-    elif current_device.get("feature_level", 0) < version.FEATURE_LEVEL:
-        console.print(
-            f"[grey50][[yellow]![/]][/] [yellow]Device is outdated. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
-        )
+    if not ignore_protocol_version:
+        if current_device.get("protocol_version", 0) < version.PROTOCOL_VERSION:
+            console.print(
+                f"[grey50][[bright_red]x[/]][/] [bright_red]Device is too outdated to use. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+            )
+            unset_target_device()
+            sys.exit(1)
+        elif (
+            current_device.get("protocol_version", 0) > version.PROTOCOL_VERSION
+            or current_device.get("feature_level", 0) > version.FEATURE_LEVEL
+        ):
+            console.print(
+                f"[grey50][[bright_red]x[/]][/] [bright_red]CLI is too outdated to use this device. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+            )
+            unset_target_device()
+            sys.exit(1)
+        elif current_device.get("feature_level", 0) < version.FEATURE_LEVEL:
+            console.print(
+                f"[grey50][[yellow]![/]][/] [yellow]Device is outdated. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+            )
     if final_feedback:
         console.print(
             f"[grey50][[blue]i[/]] You are connected to [blue]{current_device['name']}[/].[/]",
@@ -378,7 +455,7 @@ def connect(name_or_mac: str | None):
     current_device = get_target_device()
     if current_device is None:
         console.print("[grey50][[bright_red]x[/]][/] [bright_red]Failed to connect.[/]")
-        return
+        sys.exit(1)
     if took is not None and took.seconds > 1:
         console.print(
             f"[grey50][[green]:heavy_check_mark:[/]] ([cyan]{took.seconds // 60:0>2}:{took.seconds % 60:0>2}[/]) [green]Connected to [blue]{current_device['name']}[/].[/][/]",
@@ -410,7 +487,43 @@ def disconnect():
 def reboot(dev: str):
     ensure_connected(dev)
     success = send(common.Querys.HUB_REBOOT).get_success()
-    assert success == common.Success.OK
+    if success == common.Success.OK:
+        console.print(
+            "[grey50][[green]:heavy_check_mark:[/]] [green]Rebooted.[/][/]",
+        )
+    else:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to reboot.[/]",
+        )
+        sys.exit(1)
+    time.sleep(5)
+    ensure_connected(dev, final_feedback=False)
+
+
+@main.command("rename")
+@click.option("--dev", metavar="DEVICE", type=click.STRING)
+@click.argument("name", metavar="NAME", type=click.STRING)
+def rename(dev: str, name: str):
+    ensure_connected(dev)
+    device = get_target_device()
+    assert device is not None
+    success = send(common.Querys.HUB_RENAME, name).get_success()
+    if success != common.Success.OK:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to rename.[/]",
+        )
+        sys.exit(1)
+    success = send(common.Querys.HUB_REBOOT).get_success()
+    if success != common.Success.OK:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to reboot.[/]",
+        )
+        sys.exit(1)
+    time.sleep(5)
+    ensure_connected(device.get("address"), final_feedback=False)
+    console.print(
+        "[grey50][[green]:heavy_check_mark:[/]] [green]Renamed.[/][/]",
+    )
 
 
 @main.command("sync")
@@ -420,72 +533,17 @@ def reboot(dev: str):
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path, exists=True),
 )
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
-def sync(directory: Path, dev: str):
+@click.option("--firmware", metavar="DEVICE", is_flag=True)
+def sync(directory: Path, dev: str, firmware: bool):
     ensure_connected(dev)
-    resp = send(common.Querys.HUB_SYNC, str(directory.absolute()))
-    assert resp.get_success() == common.Success.OK
-    prog = resp.progress()
-    tasks = {}
-    task_progress = {}
-    with (
-        progress.Progress(
-            progress.SpinnerColumn(),
-            progress.TextColumn("[grey70]{task.description}[/]"),
-            progress.BarColumn(),
-            progress.TaskProgressColumn(),
-            progress.TimeElapsedColumn(),
-            transient=False,
-            console=console,
-            expand=True,
-        ) as step_progress,
-        progress.Progress(
-            progress.TextColumn("[grey70]{task.description}[/]"),
-            progress.BarColumn(),
-            progress.DownloadColumn(),
-            progress.TimeRemainingColumn(),
-            transient=True,
-            console=console,
-            expand=True,
-        ) as byte_progress,
-    ):
-        for packet, data in prog:
-            match packet:
-                case common.TaskManager.STARTED:
-                    task_progress[data["id"]] = byte_progress if data["unit"] == "B" else step_progress
-                    tasks[data["id"]] = task_progress[data["id"]].add_task(
-                        data["name"],
-                        completed=data["prog"],
-                        total=data["max_prog"],
-                    )
-                case common.TaskManager.SET_PROG:
-                    task_progress[data["id"]].update(
-                        tasks[data["id"]],
-                        completed=data["prog"],
-                    )
-                case common.TaskManager.SET_MAX:
-                    task_progress[data["id"]].update(
-                        tasks[data["id"]],
-                        total=data["max_prog"],
-                    )
-                case common.TaskManager.FINISHED:
-                    task_progress[data["id"]].stop_task(tasks[data["id"]])
-                    task_progress[data["id"]].stop_task(tasks[data["id"]])
-                    if data["id"] != 1:
-                        task_progress[data["id"]].remove_task(tasks[data["id"]])
-                case common.TaskManager.FAILED:
-                    task_progress[data["id"]].stop_task(tasks[data["id"]])
-                    task_progress[data["id"]].remove_task(tasks[data["id"]])
-                case _:
-                    raise AssertionError
-
-    if prog.success and resp.get_success() == common.Success.OK:
-        console.print(
-            "[grey50][[green]:heavy_check_mark:[/]] [green]Synced.[/][/]",
-        )
-    else:
-        console.print(
-            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to sync.[/]",
-        )
+    sync_dir(directory, firmware)
+    if firmware:
+        success = send(common.Querys.HUB_REBOOT).get_success()
+        if success == common.Success.FAILED:
+            console.print(
+                "[grey50][[bright_red]x[/]][/] [bright_red]Failed to reboot.[/]",
+            )
+            sys.exit(1)
 
 
 @main.command("start")
@@ -501,6 +559,7 @@ def start(dev: str):
         console.print(
             "[grey50][[bright_red]x[/]][/] [bright_red]Failed to start program.[/]",
         )
+        sys.exit(1)
 
 
 @main.command("stop")
@@ -516,3 +575,89 @@ def stop(dev: str):
         console.print(
             "[grey50][[bright_red]x[/]][/] [bright_red]Failed to stop program.[/]",
         )
+        sys.exit(1)
+
+
+@main.command("fw-update")
+@click.option("--dev", metavar="DEVICE", type=click.STRING)
+@click.option("--ver", "-v", metavar="VERSION", type=click.STRING)
+@click.option("--name", "-n", metavar="NAME", type=click.STRING)
+def fw_update(dev: str, ver: str | None, name: str | None):
+    target_version = ver
+    ensure_connected(dev, ignore_protocol_version=True)
+
+    device = get_target_device()
+    assert device is not None
+    if not version.supports(device, version.FEATURE_OTA_FW_UPDATE):
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]The device does not yet support OTA firmware updates. Please use flash.[/]",
+        )
+        sys.exit(1)
+
+    if name is None:
+        name = device.get("name", "UnnamedHub")
+
+    success = send(command=common.Querys.HUB_STOP_PROGRAM).get_success()
+    if success == common.Success.FAILED:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to stop running program.[/]",
+        )
+        sys.exit(1)
+
+    versions = requests.get("https://basil.jojojux.de/spielzeug/versions.json").json()
+
+    if target_version is None:
+        target_version = versions[0]
+        console.print(
+            f"[grey50][[blue]i[/]] No version specified, using latest: {target_version}.[/]",
+        )
+    else:
+        if target_version not in versions:
+            console.print(
+                "[grey50][[bright_red]x[/]][/] [bright_red]Target version is unknown.[/]",
+            )
+            sys.exit(1)
+
+    protocol_version, feature_level, patch = map(int, target_version.split("."))
+
+    if protocol_version > version.PROTOCOL_VERSION or feature_level > version.FEATURE_LEVEL:
+        console.print(
+            "[grey50][[yellow]![/]][/] [yellow]To use the device after this update, you need to update the CLI. Ctrl-C to cancel.[/]",
+        )
+        time.sleep(5)
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        tmp = Path(tempdir)
+        with progress.Progress(
+            progress.SpinnerColumn(),
+            progress.TextColumn("[grey70]{task.description}[/]"),
+            progress.BarColumn(),
+            progress.TransferSpeedColumn(),
+            progress.DownloadColumn(),
+            transient=False,
+            console=console,
+            expand=True,
+        ) as prog:
+            task = prog.add_task("Downloading update.zip")
+            with (tmp / "update.zip").open("wb") as f:
+                resp = requests.get(f"https://basil.jojojux.de/spielzeug/update/{target_version}.zip", stream=True)
+                prog.update(task, completed=0, total=int(resp.headers["Content-Length"]))
+                for chunk in resp.iter_content(100):
+                    f.write(chunk)
+                    prog.advance(task, len(chunk))
+
+        zipfile.ZipFile(tmp / "update.zip").extractall(tmp / "update")
+
+        (tmp / "update" / "spielzeug" / "config").mkdir()
+        (tmp / "update" / "spielzeug" / "config" / "hubname").write_text(name)
+
+        sync_dir(tmp / "update" / "spielzeug", True)
+
+    success = send(common.Querys.HUB_REBOOT).get_success()
+    if success == common.Success.FAILED:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to reboot.[/]",
+        )
+        sys.exit(1)
+    time.sleep(5)
+    ensure_connected(device.get("address"), final_feedback=False)

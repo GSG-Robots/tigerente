@@ -26,6 +26,8 @@ class Querys(enum.Enum):
     HUB_START_PROGRAM = enum.auto()
     HUB_STOP_PROGRAM = enum.auto()
 
+    HUB_RENAME = enum.auto()
+
 
 class Success(enum.Enum):
     OK = enum.auto()

@@ -1,6 +1,6 @@
 [project]
 name = "tigerente"
-version = "0.2.0"
+version = "0.3.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -9,6 +9,7 @@ dependencies = [
     "click>=8.3.1",
     "mpy-cross>=1.26.1.post2",
     "pyyaml>=6.0.3",
+    "requests>=2.32.5",
     "rich>=14.2.0",
 ]
 

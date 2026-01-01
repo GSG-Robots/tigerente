@@ -62,11 +62,14 @@ class BLEIOConnector:
                 packet_id = packet[:1]
                 arguments = packet[1:]
                 if packet_id == b"P":
-                    ...  # Report print: arguments.decode(errors="replace")
+                    logging.info(arguments.decode(errors="replace"))
+                    # Report print: arguments.decode(errors="replace")
                 elif packet_id == b"E":
-                    ...  # Report error (user): arguments.decode(errors="replace")
+                    logging.warning(arguments.decode(errors="replace"))
+                    # Report error (user): arguments.decode(errors="replace")
                 elif packet_id == b"!":
-                    ...  # Report error (critical): arguments.decode(errors="replace")
+                    logging.error(arguments.decode(errors="replace"))
+                    # Report error (critical): arguments.decode(errors="replace")
                 else:
                     self._pending_packets.append((packet_id, arguments))
             self._packet = b""

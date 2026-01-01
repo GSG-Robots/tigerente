@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import json
 import logging
 import socket
 import time
+import zlib
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -170,16 +172,42 @@ async def handle_client(conn: socket.socket):
             else:
                 await send(conn, common.Success.FAILED)
         case common.Querys.HUB_SYNC:
-            dir_ = (await recv(conn, 1024)).decode("utf-8")
+            args = json.loads((await recv(conn, 1024)).decode("utf-8"))
+            dir_ = args["directory"]
+            mode = "firmware-update" if args["firmware_mode"] else ""
 
             if bleio is not None:
                 await send(conn, common.Success.OK)
                 tasks = Tasks(conn)
-                success = await build.folder_sync(bleio, Path(dir_), tasks)
+                success = await build.folder_sync(bleio, Path(dir_), tasks, mode, skip_build=args["firmware_mode"])
                 await tasks.done()
                 if success:
                     await send(conn, common.Success.OK)
                 else:
+                    await send(conn, common.Success.FAILED)
+            else:
+                await send(conn, common.Success.FAILED)
+        case common.Querys.HUB_RENAME:
+            name = await recv(conn, 100)
+
+            if bleio is not None:
+                try:
+                    await bleio.send_packet(b"Y", b"firmware-update")
+                    assert (await bleio.get_packet_wait())[0] == b"K"
+                    await bleio.send_packet(b"D", b"/config")
+                    assert (await bleio.get_packet_wait())[0] == b"K"
+                    await bleio.send_packet(b"F", b"/config/hubname 0")
+                    assert (await bleio.get_packet_wait())[0] == b"U"
+                    await bleio.send_packet(b"C", base64.b64encode(zlib.compress(name)))
+                    assert (await bleio.get_packet_wait())[0] == b"K"
+                    await bleio.send_packet(b"E")
+                    assert (await bleio.get_packet_wait())[0] == b"K"
+                    await bleio.send_packet(b"$")
+                    assert (await bleio.get_packet_wait())[0] == b"K"
+                    config.cache_device(config.target_device or "", name.decode("ascii"), time.time())
+                    await send(conn, common.Success.OK)
+                except BaseException as e:
+                    logging.error("Failed to rename", exc_info=e)
                     await send(conn, common.Success.FAILED)
             else:
                 await send(conn, common.Success.FAILED)
