@@ -14,6 +14,7 @@ ADJECTIVES = [
     "Kinky",
     "Lazy",
     "Mighty",
+    "Short",
     "Nifty",
     "Obnoxious",
     "Playful",
@@ -45,6 +46,7 @@ ADJECTIVES = [
     "Perky",
     "Quirky",
     "Reckless",
+    "Big",
     "Snappy",
     "Twitchy",
     "Unruly",
@@ -64,6 +66,7 @@ ADJECTIVES = [
     "Jittery",
     "Keen",
     "Loud",
+    "Long",
     "Manic",
     "Nervous",
     "Ornery",
@@ -76,7 +79,7 @@ ADJECTIVES = [
     "Vigilant",
     "Witty",
     "Yelling",
-    "Zesty",
+    "Tiny",
     "Adamant",
     "Boisterous",
     "Capable",
@@ -100,7 +103,6 @@ ADJECTIVES = [
 ]
 
 NOUNS = [
-    # Animals
     "Dolphin",
     "Tiger",
     "Eagle",
@@ -123,6 +125,7 @@ NOUNS = [
     "Peacock",
     "Owl",
     "Fox",
+    "Snake",
     "Otter",
     "Lynx",
     "Oak",
@@ -147,6 +150,7 @@ NOUNS = [
     "Nettle",
     "Sage",
     "Mint",
+    "Stick",
     "Poppy",
     "Lotus",
     "Robot",
@@ -181,6 +185,7 @@ NOUNS = [
     "Accelerator",
     "Regulator",
     "Modulator",
+    "Pipe",
 ]
 
 

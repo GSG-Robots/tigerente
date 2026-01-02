@@ -60,7 +60,7 @@ def build_py(src: Path, dest: Path, src_dir: Path):
     return True
 
 
-def copy_py(src: Path, dest: Path, src_dir: Path):
+def copy(src: Path, dest: Path, src_dir: Path):
     shutil.copy(src, dest)
     return True
 
@@ -89,7 +89,7 @@ def build(src_dir: Path, build_dir: Path):
         # Skip stup files
         if file.suffix == ".pyi":
             continue
-        builder, new_suffix = file_builders.get(file.suffix, (None, None, None))
+        builder, new_suffix = file_builders.get(file.suffix, (copy, file.suffix))
         if not builder:
             logging.warning(f"Unable to build {file.suffix} file.")
             continue
