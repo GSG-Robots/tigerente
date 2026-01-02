@@ -12,6 +12,8 @@ DEVICE_CONNECT_PAUSE = 3
 
 
 class Querys(enum.Enum):
+    IS_WORKING = enum.auto()
+
     GET_ALL_DEVICES = enum.auto()
     GET_NEAR_DEVICES = enum.auto()
     GET_DEVICE_BY_ADDRESS = enum.auto()
@@ -25,8 +27,11 @@ class Querys(enum.Enum):
     HUB_SYNC = enum.auto()
     HUB_START_PROGRAM = enum.auto()
     HUB_STOP_PROGRAM = enum.auto()
+    HUB_IDENTIFY = enum.auto()
 
     HUB_RENAME = enum.auto()
+
+    CACHE_DEVICE = enum.auto()
 
 
 class Success(enum.Enum):

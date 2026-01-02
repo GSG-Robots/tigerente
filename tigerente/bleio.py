@@ -10,6 +10,9 @@ UART_TX_CHAR_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 UART_RX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 
+class OnDeviceError(RuntimeError): ...
+
+
 class BLEIOConnector:
     def __init__(self, address: str):
         self.address = address
@@ -37,18 +40,28 @@ class BLEIOConnector:
 
     def get_packet(self):
         if self._pending_packets:
-            return self._pending_packets.popleft()
+            packet, data = self._pending_packets.popleft()
+            if packet == b"!":
+                raise OnDeviceError(data.decode("utf-8", errors="replace"))
+            return packet, data
         return None
 
-    async def get_packet_wait(self):
+    async def get_packet_wait(self, timeout=1000):
         ms = 0
         while not self._pending_packets:
             await asyncio.sleep(0.001)
             ms += 1
 
-            if ms >= 1000:
+            if ms >= timeout:
                 raise TimeoutError
-        return self._pending_packets.popleft()
+        packet, data = self._pending_packets.popleft()
+        if packet == b"!":
+            raise OnDeviceError(data.decode("utf-8", errors="replace"))
+        return packet, data
+
+    async def expect_OK(self):
+        packet = (await self.get_packet_wait())[0]
+        assert packet == b"K", f"Expected OK, got {packet}"
 
     async def _handle_rx(
         self,
@@ -67,9 +80,9 @@ class BLEIOConnector:
                 elif packet_id == b"E":
                     logging.warning(arguments.decode(errors="replace"))
                     # Report error (user): arguments.decode(errors="replace")
-                elif packet_id == b"!":
-                    logging.error(arguments.decode(errors="replace"))
-                    # Report error (critical): arguments.decode(errors="replace")
+                # elif packet_id == b"!":
+                #     logging.error(arguments.decode(errors="replace"))
+                #     # Report error (system): arguments.decode(errors="replace")
                 else:
                     self._pending_packets.append((packet_id, arguments))
             self._packet = b""

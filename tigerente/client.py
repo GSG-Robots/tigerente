@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import enum
 import json
@@ -18,8 +19,10 @@ from rich.prompt import Prompt
 from rich.text import Text
 
 from . import common, version
+from .custom_types import CachedDevice
 from .daemon import run_daemon
-from .types import CachedDevice
+from .random_namegen import generate_random_name
+from .serflash import upload_runtime
 
 console = Console()
 
@@ -31,7 +34,7 @@ def get_sock(start_new=True, max_retries=10, delay=1) -> socket.socket:
         try:
             s.connect((common.HOST, common.PORT))
             if has_started_daemon:
-                time.sleep(5)
+                time.sleep(3)
             return s
         except ConnectionRefusedError:
             if start_new:
@@ -58,16 +61,45 @@ class _Response:
     def get_success(self, timeout: int = 5):
         return self.get_enum(common.Success, timeout)
 
+    def require_no_error(self, timeout: int = 5):
+        success = self.recv(1, timeout)
+        if success == b"\xab":
+            length = int.from_bytes(self.recv(4, timeout), "big")
+            exception = self.recv(length, timeout).decode("utf-8")
+            console.print(
+                "\n\n[grey50]> [bright_red]"
+                + "[/]\n> [bright_red]".join(exception.splitlines())
+                + "[/]\n\n[grey50][[bright_red]x[/]][/] [bright_red]The device failed to execute this command. See error message above.[/]",
+            )
+            sys.exit(1)
+        if success == b"\x00":
+            length = int.from_bytes(self.recv(4, timeout), "big")
+            exception = self.recv(length, timeout).decode("utf-8")
+            console.print(
+                "\n\n[grey50]> [bright_red]"
+                + "[/]\n> [bright_red]".join(exception.splitlines())
+                + "[/]\n\n[grey50][[bright_red]x[/]][/] [bright_red]The daemon failed to execute this command. See error message above.[/]",
+            )
+            sys.exit(1)
+        assert success == b"\xff", "Invalid success state"
+
     def get_enum[T: enum.Enum](self, enum: type[T], timeout: int = 5) -> T:
-        byte = self.recv(1)
+        self.require_no_error()
+        byte = self.recv(1, timeout)
         return common.read_into(byte, enum)
 
+    def get_int4[T: enum.Enum](self, timeout: int = 5) -> int:
+        self.require_no_error()
+        bytes_ = self.recv(4, timeout)
+        return int.from_bytes(bytes_, "big")
+
     def get_string(self, timeout: int = 5):
+        self.require_no_error()
         length = int.from_bytes(self.recv(4, timeout), "big")
         return self.recv(length, timeout)
 
     def get_data(self, timeout: int = 5):
-        return json.loads(self.get_string())
+        return json.loads(self.get_string(timeout))
 
     def recv(self, bytes: int, timeout: int = 5):
         start = time.time()
@@ -101,6 +133,15 @@ class _ResponseProgress:
             self.success = False
         data = self.resp.get_data(self.timeout)
         return packet, data
+
+
+def ensure_bluetooth_works():
+    working = send(common.Querys.IS_WORKING).get_int4()
+    if not working & 1:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]No bluetooth adapter found.[/]",
+        )
+        sys.exit(1)
 
 
 def send(command: common.Querys, args: str = "", start_new_daemon=True):
@@ -344,7 +385,7 @@ def ensure_connected(dev: str | None, final_feedback=True, ignore_protocol_versi
             devices = get_nearby_devices()
             if not devices:
                 console.print("[grey50][[bright_red]x[/]][/] [bright_red]No devices found.[/]")
-                return None
+                sys.exit(1)
             console.print("[grey70]These devices seem to be nearby:[/]")
             list_devices(devices, current_state, current_device)
             name = Prompt.ask(
@@ -434,16 +475,30 @@ def kill_daemon_():
         console.print("Daemon was killed...")
 
 
+@main.command("list-devices")
+@click.option("--nearby", "-n", is_flag=True)
+@click.argument("fields", nargs=-1, default=("name",))
+def list_devices_cli(nearby: bool, fields: list[str]):
+    for field in fields:
+        if field not in ("name", "address", "last_seen", "protocol_version", "feature_level"):
+            print("Invalid field:", field)
+            sys.exit(1)
+    devices = get_nearby_devices() if nearby else get_all_devices()
+    for device in devices.values():
+        print(" ".join(device[field] for field in fields))
+
+
 @main.command("connect")
 @click.argument("name_or_mac", required=False, default=None)
 def connect(name_or_mac: str | None):
+    ensure_bluetooth_works()
     if name_or_mac is None:
         current_device = get_target_device()
         current_state = get_connection_state()
         devices = get_nearby_devices()
         if not devices:
-            console.print("[[bright_red1]x[/]] [bright_red]No devices found.[/]")
-            return
+            console.print("[[bright_red]x[/]] [bright_red]No devices found.[/]")
+            sys.exit(1)
         console.print("[grey70]These devices seem to be nearby:[/]")
         list_devices(devices, current_state, current_device)
         name_or_mac = Prompt.ask(
@@ -468,6 +523,7 @@ def connect(name_or_mac: str | None):
 
 @main.command("disconnect")
 def disconnect():
+    ensure_bluetooth_works()
     current_device = get_target_device()
     current_state = get_connection_state()
     if current_state == common.ConnectionState.DISCONNECTED:
@@ -477,14 +533,16 @@ def disconnect():
         return
     if current_state == common.ConnectionState.CONNECTED and current_device:
         console.print(
-            f"[grey50][[blue]i[/]] You were connected to [yellow]{current_device['name']}[/].[/]",
+            f"[grey50][[blue]i[/]] You were connected to [blue]{current_device['name']}[/].[/]",
         )
     ensure_disconnect(feedback=True)
 
 
 @main.command("reboot")
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
-def reboot(dev: str):
+@click.option("--no-reconnect", is_flag=True)
+def reboot(dev: str, no_reconnect: bool):
+    ensure_bluetooth_works()
     ensure_connected(dev)
     success = send(common.Querys.HUB_REBOOT).get_success()
     if success == common.Success.OK:
@@ -496,14 +554,41 @@ def reboot(dev: str):
             "[grey50][[bright_red]x[/]][/] [bright_red]Failed to reboot.[/]",
         )
         sys.exit(1)
-    time.sleep(5)
-    ensure_connected(dev, final_feedback=False)
+    if not no_reconnect:
+        time.sleep(5)
+        ensure_connected(dev, final_feedback=False)
+
+
+@main.command("identify")
+@click.option("--dev", metavar="DEVICE", type=click.STRING)
+def identify(dev: str):
+    ensure_bluetooth_works()
+    ensure_connected(dev)
+    device = get_target_device()
+    assert device is not None
+    if not version.supports(device, version.FEATURE_IDENTIFY):
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]The device does not yet support identifying.[/]",
+        )
+        sys.exit(1)
+    success = send(command=common.Querys.HUB_IDENTIFY).get_success()
+    if success == common.Success.OK:
+        console.print(
+            "[grey50][[green]:heavy_check_mark:[/]] [green]Hub should blink now.[/][/]",
+        )
+    else:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to identify.[/]",
+        )
+        sys.exit(1)
 
 
 @main.command("rename")
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
 @click.argument("name", metavar="NAME", type=click.STRING)
-def rename(dev: str, name: str):
+@click.option("--no-reconnect", is_flag=True)
+def rename(dev: str, name: str, no_reconnect: bool):
+    ensure_bluetooth_works()
     ensure_connected(dev)
     device = get_target_device()
     assert device is not None
@@ -519,8 +604,31 @@ def rename(dev: str, name: str):
             "[grey50][[bright_red]x[/]][/] [bright_red]Failed to reboot.[/]",
         )
         sys.exit(1)
-    time.sleep(5)
-    ensure_connected(device.get("address"), final_feedback=False)
+
+    if not no_reconnect:
+        time.sleep(5)
+        send(
+            common.Querys.CACHE_DEVICE,
+            json.dumps(
+                {
+                    "name": name,
+                    "address": device.get("address"),
+                    "last_seen": time.time(),
+                },
+            ),
+        )
+        ensure_connected(device.get("address"), final_feedback=False)
+    else:
+        send(
+            common.Querys.CACHE_DEVICE,
+            json.dumps(
+                {
+                    "name": name,
+                    "address": device.get("address"),
+                    "last_seen": time.time(),
+                },
+            ),
+        )
     console.print(
         "[grey50][[green]:heavy_check_mark:[/]] [green]Renamed.[/][/]",
     )
@@ -535,6 +643,7 @@ def rename(dev: str, name: str):
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
 @click.option("--firmware", metavar="DEVICE", is_flag=True)
 def sync(directory: Path, dev: str, firmware: bool):
+    ensure_bluetooth_works()
     ensure_connected(dev)
     sync_dir(directory, firmware)
     if firmware:
@@ -549,6 +658,7 @@ def sync(directory: Path, dev: str, firmware: bool):
 @main.command("start")
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
 def start(dev: str):
+    ensure_bluetooth_works()
     ensure_connected(dev)
     success = send(command=common.Querys.HUB_START_PROGRAM).get_success()
     if success == common.Success.OK:
@@ -565,6 +675,7 @@ def start(dev: str):
 @main.command("stop")
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
 def stop(dev: str):
+    ensure_bluetooth_works()
     ensure_connected(dev)
     success = send(common.Querys.HUB_STOP_PROGRAM).get_success()
     if success == common.Success.OK:
@@ -578,32 +689,8 @@ def stop(dev: str):
         sys.exit(1)
 
 
-@main.command("fw-update")
-@click.option("--dev", metavar="DEVICE", type=click.STRING)
-@click.option("--ver", "-v", metavar="VERSION", type=click.STRING)
-@click.option("--name", "-n", metavar="NAME", type=click.STRING)
-def fw_update(dev: str, ver: str | None, name: str | None):
-    target_version = ver
-    ensure_connected(dev, ignore_protocol_version=True)
-
-    device = get_target_device()
-    assert device is not None
-    if not version.supports(device, version.FEATURE_OTA_FW_UPDATE):
-        console.print(
-            "[grey50][[bright_red]x[/]][/] [bright_red]The device does not yet support OTA firmware updates. Please use flash.[/]",
-        )
-        sys.exit(1)
-
-    if name is None:
-        name = device.get("name", "UnnamedHub")
-
-    success = send(command=common.Querys.HUB_STOP_PROGRAM).get_success()
-    if success == common.Success.FAILED:
-        console.print(
-            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to stop running program.[/]",
-        )
-        sys.exit(1)
-
+@contextlib.contextmanager
+def firmware(target_version: str | None = None, name: str | None = None):
     versions = requests.get("https://basil.jojojux.de/spielzeug/versions.json").json()
 
     if target_version is None:
@@ -618,13 +705,19 @@ def fw_update(dev: str, ver: str | None, name: str | None):
             )
             sys.exit(1)
 
-    protocol_version, feature_level, patch = map(int, target_version.split("."))
-
-    if protocol_version > version.PROTOCOL_VERSION or feature_level > version.FEATURE_LEVEL:
+    if target_version == "restore-original":
         console.print(
-            "[grey50][[yellow]![/]][/] [yellow]To use the device after this update, you need to update the CLI. Ctrl-C to cancel.[/]",
+            "[grey50][[yellow]![/]][/] [yellow]This will restore the original lego firmware. Ctrl-C to cancel.[/]",
         )
         time.sleep(5)
+    else:
+        protocol_version, feature_level, patch = map(int, target_version.split("."))
+
+        if protocol_version > version.PROTOCOL_VERSION or feature_level > version.FEATURE_LEVEL:
+            console.print(
+                "[grey50][[yellow]![/]][/] [yellow]The firmware that will be installed is newer than your CLI. In order to use the device after the installation, you need to update the CLI. Ctrl-C to cancel.[/]",
+            )
+            time.sleep(5)
 
     with tempfile.TemporaryDirectory() as tempdir:
         tmp = Path(tempdir)
@@ -640,7 +733,11 @@ def fw_update(dev: str, ver: str | None, name: str | None):
         ) as prog:
             task = prog.add_task("Downloading update.zip")
             with (tmp / "update.zip").open("wb") as f:
-                resp = requests.get(f"https://basil.jojojux.de/spielzeug/update/{target_version}.zip", stream=True)
+                resp = requests.get(
+                    f"https://basil.jojojux.de/spielzeug/update/{target_version}.zip",
+                    stream=True,
+                    headers={"Cache-Control": "no-cache"},
+                )
                 prog.update(task, completed=0, total=int(resp.headers["Content-Length"]))
                 for chunk in resp.iter_content(100):
                     f.write(chunk)
@@ -648,10 +745,46 @@ def fw_update(dev: str, ver: str | None, name: str | None):
 
         zipfile.ZipFile(tmp / "update.zip").extractall(tmp / "update")
 
-        (tmp / "update" / "spielzeug" / "config").mkdir()
-        (tmp / "update" / "spielzeug" / "config" / "hubname").write_text(name)
+        if name is not None:
+            (tmp / "update" / "spielzeug" / "config").mkdir()
+            (tmp / "update" / "spielzeug" / "config" / "hubname").write_text(name)
 
-        sync_dir(tmp / "update" / "spielzeug", True)
+        yield tmp / "update"
+
+
+@main.command(
+    "fw-update",
+    help="Update the firmware over BLE. Use '-v restore-original' to restore the original lego firmware.",
+)
+@click.option("--dev", metavar="DEVICE", type=click.STRING)
+@click.option("--ver", "-v", metavar="VERSION", type=click.STRING)
+@click.option("--name", "-n", metavar="NAME", type=click.STRING)
+@click.option("--no-reconnect", is_flag=True)
+def fw_update(dev: str, ver: str | None, name: str | None, no_reconnect: bool):
+    ensure_bluetooth_works()
+    target_version = ver
+    ensure_connected(dev, ignore_protocol_version=True)
+
+    device = get_target_device()
+    assert device is not None
+    if not version.supports(device, version.FEATURE_OTA_FW_UPDATE):
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]The device does not yet support OTA firmware updates. Please use flash.[/]",
+        )
+        sys.exit(1)
+
+    if name is None:
+        name = device.get("name") or generate_random_name()
+
+    success = send(command=common.Querys.HUB_STOP_PROGRAM).get_success()
+    if success == common.Success.FAILED:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Failed to stop running program.[/]",
+        )
+        sys.exit(1)
+
+    with firmware(target_version, name) as fwdir:
+        sync_dir(fwdir / "spielzeug", True)
 
     success = send(common.Querys.HUB_REBOOT).get_success()
     if success == common.Success.FAILED:
@@ -659,5 +792,92 @@ def fw_update(dev: str, ver: str | None, name: str | None):
             "[grey50][[bright_red]x[/]][/] [bright_red]Failed to reboot.[/]",
         )
         sys.exit(1)
-    time.sleep(5)
-    ensure_connected(device.get("address"), final_feedback=False)
+
+    if target_version == "restore-original":
+        send(
+            common.Querys.CACHE_DEVICE,
+            json.dumps(
+                {
+                    "name": "Unknown",
+                    "address": device.get("address"),
+                    "last_seen": 0,
+                },
+            ),
+        )
+        ensure_disconnect()
+    elif not no_reconnect:
+        time.sleep(5)
+        send(
+            common.Querys.CACHE_DEVICE,
+            json.dumps(
+                {
+                    "name": name,
+                    "address": device.get("address"),
+                    "last_seen": time.time(),
+                },
+            ),
+        )
+        ensure_connected(device.get("address"), final_feedback=False)
+    else:
+        send(
+            common.Querys.CACHE_DEVICE,
+            json.dumps(
+                {
+                    "name": name,
+                    "address": device.get("address"),
+                    "last_seen": time.time(),
+                },
+            ),
+        )
+
+
+@main.command(
+    "fw-flash",
+    help="Update the firmware over USB. Use '-v restore-original' to restore the original lego firmware.",
+)
+@click.option("--dev", metavar="DEVICE", type=click.STRING)
+@click.option("--ver", "-v", metavar="VERSION", type=click.STRING)
+@click.option("--name", "-n", metavar="NAME", type=click.STRING)
+@click.option("--no-connect", is_flag=True)
+def fw_flash(dev: str, ver: str | None, name: str | None, no_connect: bool):
+    target_version = ver
+
+    if name is None:
+        name = generate_random_name()
+
+    with firmware(target_version, name) as fwdir:
+        mac_addr = upload_runtime(fwdir / "spielzeug", console)
+
+    if target_version == "restore-original" or no_connect:
+        if mac_addr:
+            send(
+                common.Querys.CACHE_DEVICE,
+                json.dumps(
+                    {
+                        "name": "Unknown",
+                        "address": mac_addr,
+                        "last_seen": 0,
+                    },
+                ),
+            )
+    else:
+        time.sleep(5)
+        if mac_addr:
+            send(
+                common.Querys.CACHE_DEVICE,
+                json.dumps(
+                    {
+                        "name": name,
+                        "address": mac_addr,
+                        "last_seen": time.time(),
+                    },
+                ),
+            )
+        else:
+            while name not in (device.get("name") for device in get_nearby_devices().values()):
+                time.sleep(1)
+        ensure_connected(mac_addr or name)
+
+    console.print(
+        f"[grey50][[green]:heavy_check_mark:[/]] [green]Flashed [blue]{name}[/].[/][/]",
+    )

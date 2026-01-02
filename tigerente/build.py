@@ -19,27 +19,11 @@ from .bleio import BLEIOConnector
 from .comm import Task, Tasks
 
 
-class ForceReconnect(BaseException): ...
+class UnexpectedResponseError(BaseException): ...
 
 
 mpy_cross.set_version("1.20", 6)
 mpy_cross.fix_perms()
-
-
-async def expect_OK(bleio: BLEIOConnector, ignore=b"="):
-    while True:
-        await asyncio.sleep(0.001)
-        packet = bleio.get_packet()
-        if not packet:
-            continue
-        nxt, _ = packet
-        if nxt in ignore:
-            continue
-        if nxt != b"K":
-            logging.warning(f"Expecting OK, Invalid response {nxt}, resetting connection")
-            await bleio.send_packet(b"$")
-            raise ForceReconnect
-        return True
 
 
 async def send_file(bleio: BLEIOConnector, file, task: Task | None = None):
@@ -55,7 +39,7 @@ async def send_file(bleio: BLEIOConnector, file, task: Task | None = None):
         if not chunk:
             break
         await bleio.send_packet(b"C", chunk)
-        await expect_OK(bleio)
+        await bleio.expect_OK()
         if task is not None:
             await task.update(len(chunk))
     await bleio.send_packet(b"E")
@@ -136,26 +120,20 @@ async def sync_path(
         await bleio.send_packet(b"R", ("/" + path).encode())
     elif file.is_dir():
         await bleio.send_packet(b"D", ("/" + path).encode())
-        await expect_OK(bleio)
+        await bleio.expect_OK()
     else:
         hashv = hashlib.sha256(file.read_bytes()).hexdigest()
         await bleio.send_packet(b"F", ("/" + path + " " + hashv).encode())
         while True:
-            await asyncio.sleep(0.001)
-            packet = bleio.get_packet()
-            if packet is None:
-                continue
-            nxt, _ = packet
-            if nxt == b"=":
-                continue
+            nxt, _ = await bleio.get_packet_wait()
             if nxt == b"K":
                 break
             if nxt != b"U":
                 logging.warning(
-                    f"Expecting OK or U, Invalid response {nxt}, resetting connection",
+                    f"Expecting OK or Update Request, Invalid response {nxt}, resetting connection",
                 )
                 await bleio.send_packet(b"$")
-                raise ForceReconnect
+                raise UnexpectedResponseError
 
             max_ = math.ceil(file.stat().st_size * (4 / 3))
             async with tasks.task(f"Sync file {path}...", max_, "B") as task:
@@ -170,7 +148,7 @@ async def sync_dir(
     mode: str,
 ):
     await bleio.send_packet(b"Y" + mode.encode("ascii"))
-    await expect_OK(bleio)
+    await bleio.expect_OK()
 
     files = tuple(dir.glob("**"))
     max_prog = len(files)
@@ -180,7 +158,7 @@ async def sync_dir(
             await task.update(1)
 
     await bleio.send_packet(b"N")
-    await expect_OK(bleio)
+    await bleio.expect_OK()
 
 
 async def sync_stream(bleio: BLEIOConnector, timeout=10):
@@ -220,5 +198,5 @@ async def folder_sync(
             await sync_dir(bleio, Path(BUILD_DIR), tasks, mode)
 
         await bleio.send_packet(b"P")
-        await expect_OK(bleio)
+        await bleio.expect_OK()
     return True

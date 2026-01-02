@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .types import CachedDevice
+from .custom_types import CachedDevice
 
 LOCK = threading.Lock()
 CONFIG_DIR = Path.home() / ".config" / "tigerente"
@@ -96,7 +96,10 @@ class Configuration:
             new_device["protocol_version"] = protocol_version
         if feature_level is not None:
             new_device["feature_level"] = feature_level
-        self._config_state["device_cache"][address].update(new_device)
+        if address not in self._config_state["device_cache"]:
+            self._config_state["device_cache"][address] = new_device
+        else:
+            self._config_state["device_cache"][address].update(new_device)
         self._save()
 
     @property

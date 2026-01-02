@@ -2,15 +2,26 @@ import asyncio
 import enum
 import json
 import socket
+import traceback
 
 from . import common
 
 
-async def send(conn: socket.socket, *data: enum.Enum | str):
+async def send(conn: socket.socket, *data: enum.Enum | str | int | BaseException, success=b"\xff"):
     await asyncio.get_event_loop().sock_sendall(
         conn,
         b"".join(
-            (len(st := (dat.encode("utf-8"))).to_bytes(4, "big") + st if isinstance(dat, str) else dat.value.to_bytes())
+            (
+                success + len(st := (dat.encode("utf-8"))).to_bytes(4, "big") + st
+                if isinstance(dat, str)
+                else success + dat.to_bytes(4, "big")
+                if isinstance(dat, int)
+                else success
+                + len(st := ("\n".join(traceback.format_exception(dat)).encode("utf-8"))).to_bytes(4, "big")
+                + st
+                if isinstance(dat, BaseException)
+                else success + dat.value.to_bytes()
+            )
             for dat in data
         ),
     )
