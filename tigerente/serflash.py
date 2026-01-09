@@ -7,10 +7,26 @@ from pathlib import Path
 import serial.tools.list_ports
 from rich import progress
 from rich.console import Console
+from rich.prompt import Prompt
 
 
 def get_device(console: Console):
     console.print("[grey50][[blue]i[/]] Searching for devices...[/]")
+    if sys.platform not in {"linux", "linux2"}:
+        # Dumb windows cannot comprehend usb device name
+        devices = [dev for dev in serial.tools.list_ports.comports()]
+        if len(devices) == 0:
+            console.print(
+                "[grey50][[bright_red]x[/]][/] [bright_red]No devices found.[/]",
+            )
+            sys.exit(1)
+        console.print("[grey50][[blue]i[/]] Multiple devices found:[/]")
+        for i, device in enumerate(devices):
+            console.print(f"[blue]{i + 1}[/][grey50]. [[blue]{device.name}[/]] {device.description}[/]")
+        device = Prompt.ask("[blue]Select a device[/]", choices=[device.device for device in devices])
+        console.print(f"[grey50][[blue]i[/]] [blue]{device}[/], will be flashed.[/]")
+        return serial.Serial(device, 9600)
+
     devices = [dev for dev in serial.tools.list_ports.comports() if dev.description == "SPIKE Prime VCP"]
     if len(devices) == 0:
         console.print(
@@ -20,7 +36,7 @@ def get_device(console: Console):
     if len(devices) > 1:
         console.print("[grey50][[blue]i[/]] Multiple devices found, only first will be flashed.[/]")
     else:
-        console.print("[grey50][[blue]i[/]] One devices found, will be flashed.[/]")
+        console.print("[grey50][[blue]i[/]] One device found, will be flashed.[/]")
     return serial.Serial(devices[0].device, 9600)
 
 

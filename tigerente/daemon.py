@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import socket
+import sys
 import time
 import zlib
 from contextlib import asynccontextmanager, suppress
@@ -99,14 +100,24 @@ async def stay_connected():
                         device_version = b"\00\00\00\00"
                     protocol_version = int.from_bytes(device_version[:2], "big")
                     feature_level = int.from_bytes(device_version[2:], "big")
-                    # Incompat is checked in client/CLI
-                    config.cache_device(
-                        bleio.address,
-                        bleio._ble.name[5:],
-                        time.time(),
-                        protocol_version,
-                        feature_level,
-                    )
+                    if sys.platform not in {"linux", "linux2"}:
+                        # Dumb windows cannot comprehend ble device name
+                        config.cache_device(
+                            bleio.address,
+                            (config.cached_devices.get(bleio.address) or {}).get("name", "IHateWindows"),
+                            time.time(),
+                            protocol_version,
+                            feature_level,
+                        )
+                    else:
+                        # Incompat is checked in client/CLI
+                        config.cache_device(
+                            bleio.address,
+                            bleio._ble.name[5:],
+                            time.time(),
+                            protocol_version,
+                            feature_level,
+                        )
                     conn_state = common.ConnectionState.CONNECTED
                 except Exception as e:
                     logging.error("Failed to connect", exc_info=e)
