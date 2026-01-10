@@ -18,11 +18,13 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.text import Text
 
-from . import common, version
-from .custom_types import CachedDevice
+from . import version
+from .com import common
 from .daemon import run_daemon
-from .random_namegen import generate_random_name
-from .serflash import upload_runtime
+from .usb import flasher
+from .util.build import built
+from .util.custom_types import CachedDevice
+from .util.random_namegen import generate_random_name
 
 console = Console()
 
@@ -135,6 +137,12 @@ class _ResponseProgress:
         return packet, data
 
 
+def send(command: common.Querys, args: str = "", start_new_daemon=True):
+    s = get_sock(start_new=start_new_daemon)
+    s.send(command.value.to_bytes() + args.encode("utf-8"))
+    return _Response(s)
+
+
 def ensure_bluetooth_works():
     working = send(common.Querys.IS_WORKING).get_int4()
     if not working & 1:
@@ -142,12 +150,6 @@ def ensure_bluetooth_works():
             "[grey50][[bright_red]x[/]][/] [bright_red]No bluetooth adapter found.[/]",
         )
         sys.exit(1)
-
-
-def send(command: common.Querys, args: str = "", start_new_daemon=True):
-    s = get_sock(start_new=start_new_daemon)
-    s.send(command.value.to_bytes() + args.encode("utf-8"))
-    return _Response(s)
 
 
 def get_all_devices() -> dict[str, CachedDevice]:
@@ -180,8 +182,17 @@ def get_connection_state():
     return send(common.Querys.GET_CONNECTION_STATE).get_enum(common.ConnectionState)
 
 
-def sync_dir(directory: Path, firmware: bool):
-    resp = send(common.Querys.HUB_SYNC, json.dumps({"directory": str(directory.absolute()), "firmware_mode": firmware}))
+def sync_dir(directory: Path, firmware: bool, paths: list[Path] | None = None):
+    resp = send(
+        common.Querys.HUB_SYNC,
+        json.dumps(
+            {
+                "mode": "firmware-update" if firmware else "",
+                "src_dir": str(directory.absolute()),
+                "paths": [str(path.absolute()) for path in paths] if paths is not None else [],
+            },
+        ),
+    )
     assert resp.get_success() == common.Success.OK
     prog = resp.progress()
     tasks = {}
@@ -423,7 +434,7 @@ def ensure_connected(dev: str | None, final_feedback=True, ignore_protocol_versi
     if not ignore_protocol_version:
         if current_device.get("protocol_version", 0) < version.PROTOCOL_VERSION:
             console.print(
-                f"[grey50][[bright_red]x[/]][/] [bright_red]Device is too outdated to use. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+                f"[grey50][[bright_red]x[/]][/] [bright_red]Device is too outdated to use. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device.get('protocol_version', '0')}.{current_device.get('feature_level', '0')})[/]",
             )
             unset_target_device()
             sys.exit(1)
@@ -432,13 +443,13 @@ def ensure_connected(dev: str | None, final_feedback=True, ignore_protocol_versi
             or current_device.get("feature_level", 0) > version.FEATURE_LEVEL
         ):
             console.print(
-                f"[grey50][[bright_red]x[/]][/] [bright_red]CLI is too outdated to use this device. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+                f"[grey50][[bright_red]x[/]][/] [bright_red]CLI is too outdated to use this device. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device.get('protocol_version', '0')}.{current_device.get('feature_level', '0')})[/]",
             )
             unset_target_device()
             sys.exit(1)
         elif current_device.get("feature_level", 0) < version.FEATURE_LEVEL:
             console.print(
-                f"[grey50][[yellow]![/]][/] [yellow]Device is outdated. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device['protocol_version']}.{current_device['feature_level']})[/]",
+                f"[grey50][[yellow]![/]][/] [yellow]Device is outdated. (CLI uses protocol version {version.PROTOCOL_VERSION}.{version.FEATURE_LEVEL}, device has {current_device.get('protocol_version', '0')}.{current_device.get('feature_level', '0')})[/]",
             )
     if final_feedback:
         console.print(
@@ -641,11 +652,22 @@ def rename(dev: str, name: str, no_reconnect: bool):
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path, exists=True),
 )
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
-@click.option("--firmware", metavar="DEVICE", is_flag=True)
-def sync(directory: Path, dev: str, firmware: bool):
+@click.option("--firmware", is_flag=True)
+@click.option("--no-restart", is_flag=True)
+def sync(directory: Path, dev: str, firmware: bool, no_restart: bool):
     ensure_bluetooth_works()
     ensure_connected(dev)
-    sync_dir(directory, firmware)
+    if firmware:
+        console.print(
+            "[grey50][[yellow]![/]][/] [yellow]You are installing unknown firmware. You may not be able to connect to the device afterwards and have to reflash over USB. Ctrl-C to cancel.[/]",
+        )
+        time.sleep(5)
+        sync_dir(directory, True)
+    else:
+        with built(directory) as (built_directory, _):
+            sync_dir(built_directory, False)
+    if no_restart:
+        return
     if firmware:
         success = send(common.Querys.HUB_REBOOT).get_success()
         if success == common.Success.FAILED:
@@ -653,6 +675,60 @@ def sync(directory: Path, dev: str, firmware: bool):
                 "[grey50][[bright_red]x[/]][/] [bright_red]Failed to reboot.[/]",
             )
             sys.exit(1)
+    else:
+        success = send(command=common.Querys.HUB_START_PROGRAM).get_success()
+        if success == common.Success.FAILED:
+            console.print(
+                "[grey50][[bright_red]x[/]][/] [bright_red]Failed to start program.[/]",
+            )
+            sys.exit(1)
+
+
+@main.command("syncw")
+@click.argument(
+    "directory",
+    metavar="DIRECTORY",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path, exists=True),
+)
+@click.option("--dev", metavar="DEVICE", type=click.STRING)
+def syncw(directory: Path, dev: str):
+    ensure_bluetooth_works()
+    ensure_connected(dev)
+
+    def rerun(paths: list[Path] | None = None):
+        with built(directory, paths) as (built_directory, built_paths):
+            sync_dir(built_directory, False, built_paths)
+        success = send(command=common.Querys.HUB_START_PROGRAM).get_success()
+        if success == common.Success.FAILED:
+            console.print(
+                "[grey50][[bright_red]x[/]][/] [bright_red]Failed to start program.[/]",
+            )
+            sys.exit(1)
+
+    from watchdog.events import LoggingEventHandler
+    from watchdog.observers import Observer
+
+    class Event(LoggingEventHandler):
+        def dispatch(self, event):
+            if event.event_type in ("opened", "closed", "closed_no_write"):
+                return
+            if event.event_type == "modified" and event.is_directory:
+                return
+            print(event.__class__.__name__)
+            rerun([Path(path).absolute() for path in (event.src_path, event.dest_path) if path])
+
+    rerun()
+
+    event_handler = Event()
+    observer = Observer()
+    observer.schedule(event_handler, str(directory), recursive=True)
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
 
 
 @main.command("start")
@@ -691,19 +767,18 @@ def stop(dev: str):
 
 @contextlib.contextmanager
 def firmware(target_version: str | None = None, name: str | None = None):
-    versions = requests.get("https://basil.jojojux.de/spielzeug/versions.json").json()
+    versions: list[str] = requests.get("https://basil.jojojux.de/spielzeug/versions.json").json()
 
     if target_version is None:
         target_version = versions[0]
         console.print(
             f"[grey50][[blue]i[/]] No version specified, using latest: {target_version}.[/]",
         )
-    else:
-        if target_version not in versions:
-            console.print(
-                "[grey50][[bright_red]x[/]][/] [bright_red]Target version is unknown.[/]",
-            )
-            sys.exit(1)
+    if target_version not in versions:
+        console.print(
+            "[grey50][[bright_red]x[/]][/] [bright_red]Target version is unknown.[/]",
+        )
+        sys.exit(1)
 
     if target_version == "restore-original":
         console.print(
@@ -846,7 +921,7 @@ def fw_flash(dev: str, ver: str | None, name: str | None, no_connect: bool):
         name = generate_random_name()
 
     with firmware(target_version, name) as fwdir:
-        mac_addr = upload_runtime(fwdir / "spielzeug", console)
+        mac_addr = flasher.upload_runtime(fwdir / "spielzeug", console, dev)
 
     if target_version == "restore-original" or no_connect:
         if mac_addr:

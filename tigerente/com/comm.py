@@ -31,6 +31,9 @@ async def recv(conn, max: int):
     return await asyncio.get_event_loop().sock_recv(conn, max)
 
 
+class ClientStoppedTaskError(RuntimeError): ...
+
+
 class Tasks:
     def __init__(self, conn: socket.socket):
         self.conn = conn
@@ -41,7 +44,10 @@ class Tasks:
         return Task(self.conn, self.id, name, max_prog, unit)
 
     async def done(self):
-        await send(self.conn, common.TaskManager.DONE)
+        try:
+            await send(self.conn, common.TaskManager.DONE)
+        except BrokenPipeError:
+            raise ClientStoppedTaskError from None
 
 
 class Task:
@@ -61,19 +67,22 @@ class Task:
         self.unit = unit
 
     async def start(self):
-        await send(
-            self.conn,
-            common.TaskManager.STARTED,
-            json.dumps(
-                {
-                    "id": self.id,
-                    "name": self.name,
-                    "prog": self.progress,
-                    "max_prog": self.max_progress,
-                    "unit": self.unit,
-                },
-            ),
-        )
+        try:
+            await send(
+                self.conn,
+                common.TaskManager.STARTED,
+                json.dumps(
+                    {
+                        "id": self.id,
+                        "name": self.name,
+                        "prog": self.progress,
+                        "max_prog": self.max_progress,
+                        "unit": self.unit,
+                    },
+                ),
+            )
+        except BrokenPipeError:
+            raise ClientStoppedTaskError from None
 
     async def set_progress(self, prog: int):
         self.progress = prog
@@ -89,44 +98,56 @@ class Task:
 
     async def finish(self):
         self.progress = 0
-        await send(
-            self.conn,
-            common.TaskManager.FINISHED,
-            json.dumps({"id": self.id}),
-        )
+        try:
+            await send(
+                self.conn,
+                common.TaskManager.FINISHED,
+                json.dumps({"id": self.id}),
+            )
+        except BrokenPipeError:
+            raise ClientStoppedTaskError from None
 
     async def fail(self):
         self.progress = 0
-        await send(
-            self.conn,
-            common.TaskManager.FAILED,
-            json.dumps({"id": self.id}),
-        )
+        try:
+            await send(
+                self.conn,
+                common.TaskManager.FAILED,
+                json.dumps({"id": self.id}),
+            )
+        except BrokenPipeError:
+            raise ClientStoppedTaskError from None
 
     async def set_max(self, max_progress: int):
         self.max_progress = max_progress
-        await send(
-            self.conn,
-            common.TaskManager.SET_MAX,
-            json.dumps(
-                {
-                    "id": self.id,
-                    "max_prog": max_progress,
-                },
-            ),
-        )
+        try:
+            await send(
+                self.conn,
+                common.TaskManager.SET_MAX,
+                json.dumps(
+                    {
+                        "id": self.id,
+                        "max_prog": max_progress,
+                    },
+                ),
+            )
+        except BrokenPipeError:
+            raise ClientStoppedTaskError from None
 
     async def _update_prog(self):
-        await send(
-            self.conn,
-            common.TaskManager.SET_PROG,
-            json.dumps(
-                {
-                    "id": self.id,
-                    "prog": self.progress,
-                },
-            ),
-        )
+        try:
+            await send(
+                self.conn,
+                common.TaskManager.SET_PROG,
+                json.dumps(
+                    {
+                        "id": self.id,
+                        "prog": self.progress,
+                    },
+                ),
+            )
+        except BrokenPipeError:
+            raise ClientStoppedTaskError from None
 
     async def __aenter__(self):
         await self.start()

@@ -63,8 +63,8 @@ def write_command(ser, cmd, no_wait=False):
         wait_for_prompt(ser)
 
 
-def upload_runtime(sync_dir: Path, console: Console):
-    ser = get_device(console)
+def upload_runtime(sync_dir: Path, console: Console, dev: str):
+    ser = serial.Serial(dev, 9600) if dev else get_device(console)
 
     # Escape any running programs
     write_command(ser, b"\x03", no_wait=True)

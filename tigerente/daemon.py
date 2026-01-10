@@ -12,10 +12,10 @@ from pathlib import Path
 import bleak
 import bleak.exc
 
-from . import build, common
-from .bleio import BLEIOConnector, OnDeviceError
-from .comm import Tasks, recv, send
-from .storage import config
+from .ble import sync
+from .ble.bleio import BLEIOConnector, OnDeviceError
+from .com import comm, common
+from .util.storage import config
 
 SHOULD_EXIT = False
 
@@ -100,6 +100,7 @@ async def stay_connected():
                         device_version = b"\00\00\00\00"
                     protocol_version = int.from_bytes(device_version[:2], "big")
                     feature_level = int.from_bytes(device_version[2:], "big")
+                    logging.info(bleio._ble.name + bleio._ble.address)
                     if sys.platform not in {"linux", "linux2"}:
                         # Dumb windows cannot comprehend ble device name
                         config.cache_device(
@@ -138,34 +139,34 @@ def get_near_devices():
 async def handle_client(conn: socket.socket):
     global bleio
     try:
-        packet = common.read_into(await recv(conn, 1), common.Querys)
+        packet = common.read_into(await comm.recv(conn, 1), common.Querys)
         match packet:
             case common.Querys.IS_WORKING:
-                await send(
+                await comm.send(
                     conn,
                     has_bt,
                 )
             case common.Querys.GET_ALL_DEVICES:
-                await send(
+                await comm.send(
                     conn,
                     json.dumps(
                         config.cached_devices,
                     ),
                 )
             case common.Querys.GET_NEAR_DEVICES:
-                await send(
+                await comm.send(
                     conn,
                     json.dumps(get_near_devices()),
                 )
             case common.Querys.GET_DEVICE_BY_ADDRESS:
-                mac_address = (await recv(conn, 17)).decode("utf-8")
-                await send(
+                mac_address = (await comm.recv(conn, 17)).decode("utf-8")
+                await comm.send(
                     conn,
                     json.dumps(config.cached_devices.get(mac_address)),
                 )
             case common.Querys.GET_TARGET_DEVICE:
                 if config.target_device is not None:
-                    await send(
+                    await comm.send(
                         conn,
                         json.dumps(
                             config.cached_devices.get(config.target_device)
@@ -179,104 +180,112 @@ async def handle_client(conn: socket.socket):
                         ),
                     )
                 else:
-                    await send(conn, "null")
+                    await comm.send(conn, "null")
             case common.Querys.SET_TARGET_DEVICE:
-                mac_address = (await recv(conn, 17)).decode("utf-8")
+                mac_address = (await comm.recv(conn, 17)).decode("utf-8")
                 config.target_device = mac_address
-                await send(conn, common.Success.OK)
+                await comm.send(conn, common.Success.OK)
             case common.Querys.UNSET_TARGET_DEVICE:
                 config.target_device = None
-                await send(conn, common.Success.OK)
+                await comm.send(conn, common.Success.OK)
             case common.Querys.KILL_DAEMON_PROCESS:
                 global SHOULD_EXIT
                 SHOULD_EXIT = True
-                await send(conn, common.Success.OK)
+                await comm.send(conn, common.Success.OK)
             case common.Querys.GET_CONNECTION_STATE:
                 if (
                     conn_state == common.ConnectionState.CONNECTED
                     and bleio is not None
                     and bleio.address != config.target_device
                 ):
-                    await send(conn, common.ConnectionState.INVALID)
+                    await comm.send(conn, common.ConnectionState.INVALID)
                 else:
-                    await send(conn, conn_state)
+                    await comm.send(conn, conn_state)
             case common.Querys.HUB_REBOOT:
                 if bleio is not None:
                     with suppress(bleak.exc.BleakError, EOFError):
                         await bleio.send_packet(b"&")
-                    await send(conn, common.Success.OK)
+                    await comm.send(conn, common.Success.OK)
                 else:
-                    await send(conn, common.Success.FAILED)
+                    await comm.send(conn, common.Success.FAILED)
             case common.Querys.HUB_IDENTIFY:
                 if bleio is not None:
                     await bleio.send_packet(b"I")
                     await bleio.expect_OK()
-                    await send(conn, common.Success.OK)
+                    await comm.send(conn, common.Success.OK)
                 else:
-                    await send(conn, common.Success.FAILED)
+                    await comm.send(conn, common.Success.FAILED)
             case common.Querys.HUB_SYNC:
-                args = json.loads((await recv(conn, 1024)).decode("utf-8"))
-                dir_ = args["directory"]
-                mode = "firmware-update" if args["firmware_mode"] else ""
+                data = await comm.recv(conn, 10000)
+                args = json.loads(data)
+                dir_: str = args["src_dir"]
+                mode: str = args["mode"]
+                paths: list[str] = args["paths"]
 
                 if bleio is not None:
-                    await send(conn, common.Success.OK)
-                    tasks = Tasks(conn)
-                    success = await build.folder_sync(bleio, Path(dir_), tasks, mode, skip_build=args["firmware_mode"])
-                    await tasks.done()
-                    if success:
-                        await send(conn, common.Success.OK)
+                    await comm.send(conn, common.Success.OK)
+                    tasks = comm.Tasks(conn)
+                    try:
+                        await sync.sync_dir(bleio, Path(dir_), tasks, mode, [Path(path) for path in paths])
+                    except comm.ClientStoppedTaskError:
+                        await tasks.done()
+                        await comm.send(conn, common.Success.FAILED)
+                    except BaseException as e:
+                        logging.error("Failed to sync dir", exc_info=e)
+                        await tasks.done()
+                        await comm.send(conn, common.Success.FAILED)
                     else:
-                        await send(conn, common.Success.FAILED)
+                        await tasks.done()
+                        await comm.send(conn, common.Success.OK)
                 else:
-                    await send(conn, common.Success.FAILED)
+                    await comm.send(conn, common.Success.FAILED)
             case common.Querys.HUB_RENAME:
-                name = await recv(conn, 100)
+                name = await comm.recv(conn, 100)
 
                 if bleio is not None:
                     try:
                         await bleio.send_packet(b"Y", b"firmware-update")
-                        assert (await bleio.get_packet_wait())[0] == b"K"
+                        await bleio.expect_OK()
                         await bleio.send_packet(b"D", b"/config")
-                        assert (await bleio.get_packet_wait())[0] == b"K"
+                        await bleio.expect_OK()
                         await bleio.send_packet(b"F", b"/config/hubname 0")
                         assert (await bleio.get_packet_wait())[0] == b"U"
                         await bleio.send_packet(b"C", base64.b64encode(zlib.compress(name)))
-                        assert (await bleio.get_packet_wait())[0] == b"K"
+                        await bleio.expect_OK()
                         await bleio.send_packet(b"E")
-                        assert (await bleio.get_packet_wait())[0] == b"K"
+                        await bleio.expect_OK()
                         await bleio.send_packet(b"$")
-                        assert (await bleio.get_packet_wait())[0] == b"K"
+                        await bleio.expect_OK()
                         config.cache_device(config.target_device or "", name.decode("ascii"), time.time())
-                        await send(conn, common.Success.OK)
+                        await comm.send(conn, common.Success.OK)
                     except BaseException as e:
                         logging.error("Failed to rename", exc_info=e)
-                        await send(conn, common.Success.FAILED)
+                        await comm.send(conn, common.Success.FAILED)
                 else:
-                    await send(conn, common.Success.FAILED)
+                    await comm.send(conn, common.Success.FAILED)
             case common.Querys.HUB_START_PROGRAM:
                 if bleio is not None:
                     await bleio.send_packet(b"P")
                     await bleio.expect_OK()
-                    await send(conn, common.Success.OK)
+                    await comm.send(conn, common.Success.OK)
                 else:
-                    await send(conn, common.Success.FAILED)
+                    await comm.send(conn, common.Success.FAILED)
             case common.Querys.HUB_STOP_PROGRAM:
                 if bleio is not None:
                     await bleio.send_packet(b"X")
                     await bleio.expect_OK()
-                    await send(conn, common.Success.OK)
+                    await comm.send(conn, common.Success.OK)
                 else:
-                    await send(conn, common.Success.FAILED)
+                    await comm.send(conn, common.Success.FAILED)
             case common.Querys.CACHE_DEVICE:
-                args = json.loads((await recv(conn, 1024)).decode("utf-8"))
+                args = json.loads((await comm.recv(conn, 1024)).decode("utf-8"))
                 config.cache_device(**args)
             case _:
-                await send(conn, common.Success.FAILED)
+                await comm.send(conn, common.Success.FAILED)
     except OnDeviceError as e:
-        await send(conn, " ".join(e.args), success=b"\xab")
+        await comm.send(conn, " ".join(e.args), success=b"\xab")
     except BaseException as e:
-        await send(conn, e, success=b"\x00")
+        await comm.send(conn, e, success=b"\x00")
     conn.close()
 
 
