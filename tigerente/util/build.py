@@ -25,8 +25,7 @@ def build_py(src: Path, dest: Path, src_dir: Path):
         stderr=subprocess.PIPE,
     )
     if result.returncode != 0:
-        print("Error from mpy cross:", result.stderr.decode("utf-8"))
-        raise RuntimeError(f"Failed to build {src} (to {dest}) using mpy-cross (stderr above)")
+        raise RuntimeError(f"Failed to build {src} (to {dest}) using mpy-cross", result.stderr.decode("utf-8"))
 
 
 def copy(src: Path, dest: Path, src_dir: Path):

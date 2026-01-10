@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import zipfile
 from pathlib import Path
 
@@ -645,6 +646,19 @@ def rename(dev: str, name: str, no_reconnect: bool):
     )
 
 
+def format_build_error(e: RuntimeError):
+    console.print(f"[grey50]{'\n'.join(traceback.format_exception(e))}[/]")
+    if len(e.args) > 1:
+        console.print(
+            "[yellow][grey50] - [/]"
+            + "\n\n[grey50] - [/]".join(["\n[grey50] > [/]".join(arg.splitlines()) for arg in e.args])
+            + "[/]",
+        )
+    console.print()
+    console.print()
+    console.print("[grey50][[bright_red]x[/]][/] [bright_red]Failed to update[/]")
+
+
 @main.command("sync")
 @click.argument(
     "directory",
@@ -664,8 +678,12 @@ def sync(directory: Path, dev: str, firmware: bool, no_restart: bool):
         time.sleep(5)
         sync_dir(directory, True)
     else:
-        with built(directory) as (built_directory, _):
-            sync_dir(built_directory, False)
+        try:
+            with built(directory) as (built_directory, _):
+                sync_dir(built_directory, False)
+        except RuntimeError as e:
+            format_build_error(e)
+            sys.exit(1)
     if no_restart:
         return
     if firmware:
@@ -684,18 +702,21 @@ def sync(directory: Path, dev: str, firmware: bool, no_restart: bool):
             sys.exit(1)
 
 
-@main.command("syncw")
+@main.command("live-sync")
 @click.argument(
     "directory",
     metavar="DIRECTORY",
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path, exists=True),
 )
 @click.option("--dev", metavar="DEVICE", type=click.STRING)
-def syncw(directory: Path, dev: str):
+def live_sync(directory: Path, dev: str):
     ensure_bluetooth_works()
-    ensure_connected(dev)
 
     def rerun(paths: list[Path] | None = None):
+        console.clear()
+        console.print()
+        console.print()
+        ensure_connected(dev)
         with built(directory, paths) as (built_directory, built_paths):
             sync_dir(built_directory, False, built_paths)
         success = send(command=common.Querys.HUB_START_PROGRAM).get_success()
@@ -715,9 +736,15 @@ def syncw(directory: Path, dev: str):
             if event.event_type == "modified" and event.is_directory:
                 return
             print(event.__class__.__name__)
-            rerun([Path(path).absolute() for path in (event.src_path, event.dest_path) if path])
+            try:
+                rerun([Path(path).absolute() for path in (event.src_path, event.dest_path) if path])
+            except RuntimeError as e:
+                format_build_error(e)
 
-    rerun()
+    try:
+        rerun()
+    except RuntimeError as e:
+        format_build_error(e)
 
     event_handler = Event()
     observer = Observer()
