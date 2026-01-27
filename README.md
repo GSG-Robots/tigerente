@@ -12,15 +12,10 @@ Nobody had a good idea how to name this, so we chose something that has to do wi
 
 - Connect & Disconnect
 - Sync folders
+- Live Sync folders (keep synced)
 - Reboot
 - Start & Stop programs
-
-## TODO / Roadmap
-
-- ``--watch``-Flag to sync changes directly without rerunning ``tente sync``
-- Command to download and flash Spielzeug automatically
-- Command to rename a device
-- More?
+- Download and flash Spielzeug automatically
 
 ## Example usage
 
