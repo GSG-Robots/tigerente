@@ -712,13 +712,7 @@ def sync(directory: Path, dev: str, firmware: bool, no_restart: bool):
 def live_sync(directory: Path, dev: str):
     ensure_bluetooth_works()
 
-    def rerun(paths: list[Path] | None = None):
-        console.clear()
-        console.print()
-        console.print()
-        ensure_connected(dev)
-        with built(directory, paths) as (built_directory, built_paths):
-            sync_dir(built_directory, False, built_paths)
+    def restart():
         success = send(command=common.Querys.HUB_START_PROGRAM).get_success()
         if success == common.Success.FAILED:
             console.print(
@@ -726,11 +720,24 @@ def live_sync(directory: Path, dev: str):
             )
             sys.exit(1)
 
+    def rerun(paths: list[Path] | None = None):
+        console.clear()
+        console.print()
+        console.print()
+        ensure_connected(dev)
+        with built(directory, paths) as (built_directory, built_paths):
+            sync_dir(built_directory, False, built_paths)
+
     from watchdog.events import LoggingEventHandler
     from watchdog.observers import Observer
 
+    last_change = 0
+
     class Event(LoggingEventHandler):
         def dispatch(self, event):
+            nonlocal last_change
+            last_change = time.time()
+            # TODO: DO THIS BETTER
             if event.event_type in ("opened", "closed", "closed_no_write"):
                 return
             if event.event_type == "modified" and event.is_directory:
@@ -743,6 +750,7 @@ def live_sync(directory: Path, dev: str):
 
     try:
         rerun()
+        restart()
     except RuntimeError as e:
         format_build_error(e)
 
@@ -752,7 +760,10 @@ def live_sync(directory: Path, dev: str):
     observer.start()
     try:
         while True:
-            time.sleep(1)
+            time.sleep(0.5)
+            if last_change and time.time() - last_change > 1.25:
+                restart()
+                last_change = 0
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
